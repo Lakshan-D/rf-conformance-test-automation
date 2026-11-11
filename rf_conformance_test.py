@@ -2,8 +2,8 @@
 rf_conformance_test.py
 
 Automated RF conformance test: configures a signal generator and a spectrum
-analyser over SCPI/LAN, runs a single measurement, checks it against a spec
-limit, calculates the compliance margin, and reports the result in both
+analyser over SCPI/LAN, runs a measurement, checks it against a spec limit,
+calculates the compliance margin, and reports the result in both
 human-readable and machine-readable form.
 
 Low-level instrument communication (LAN connect, SCPI send/query, close) is
@@ -11,18 +11,22 @@ assumed to already exist elsewhere in the test framework; connect_instrument()
 below is a placeholder for that so this module can be read and type-checked
 on its own. SCPI command syntax is realistic but illustrative where the exact
 command set for a specific instrument family isn't known.
+
+v1.1 (post-submission review): see CHANGELOG.md for what changed and why.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 import sys
+import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Iterator, Protocol
+from typing import Iterator, Optional, Protocol
 
 logger = logging.getLogger("rf_conformance_test")
 
@@ -60,9 +64,24 @@ class InstrumentError(RuntimeError):
     """Raised when an instrument reports a SCPI error or fails to respond."""
 
 
+class MeasurementError(RuntimeError):
+    """Raised when a reading comes back but can't be trusted."""
+
+
 # ---------------------------------------------------------------------------
 # Instrument wrappers
 # ---------------------------------------------------------------------------
+
+# SCPI instruments return 9.91E37 when a value isn't available ("not a number").
+SCPI_NAN = 9.91e37
+
+# Anything outside this window is treated as a broken reading, not a result.
+PLAUSIBLE_MIN_DBM = -200.0
+PLAUSIBLE_MAX_DBM = 40.0
+
+# Upper bound on error-queue reads, so a misbehaving instrument can't loop us forever.
+MAX_ERROR_QUEUE_READS = 20
+
 
 class ScpiInstrument:
     """Behaviour shared by the generator and the analyser."""
@@ -72,23 +91,32 @@ class ScpiInstrument:
         self._link = link
 
     def reset(self) -> None:
-        self._link.send("*CLS")
+        # Reset first, then clear, so anything the reset itself queues is cleared too.
         self._link.send("*RST")
+        self._link.send("*CLS")
 
     def identify(self) -> str:
         return self._link.query("*IDN?").strip()
 
     def check_errors(self) -> None:
-        """Raise if the instrument's own error queue is non-empty.
+        """Drain the instrument's error queue and raise if anything was in it.
 
         A malformed SCPI command is often silently ignored rather than
         raising on the comms layer, so the error queue is checked explicitly
-        after every configuration step instead of only trusting exceptions.
+        after every configuration step. Several errors can stack up, so the
+        queue is read until it reports 0, and every error is reported.
         """
-        response = self._link.query("SYST:ERR?").strip()
-        code = response.split(",", 1)[0].strip()  # e.g. '+0,"No error"'
-        if code not in ("0", "+0"):
-            raise InstrumentError(f"{self.name} reported SCPI error: {response}")
+        errors = []
+        for _ in range(MAX_ERROR_QUEUE_READS):
+            response = self._link.query("SYST:ERR?").strip()
+            code = response.split(",", 1)[0].strip()  # e.g. '+0,"No error"'
+            if code in ("0", "+0", "-0"):
+                break
+            errors.append(response)
+        else:
+            errors.append(f"(error queue not empty after {MAX_ERROR_QUEUE_READS} reads)")
+        if errors:
+            raise InstrumentError(f"{self.name} reported SCPI error(s): {'; '.join(errors)}")
 
     def close(self) -> None:
         self._link.close()
@@ -110,11 +138,24 @@ class SignalGenerator(ScpiInstrument):
 
 
 class SpectrumAnalyser(ScpiInstrument):
-    def configure(self, center_freq_hz: float, span_hz: float, rbw_hz: float, vbw_hz: float) -> None:
+    def configure(
+        self,
+        center_freq_hz: float,
+        span_hz: float,
+        rbw_hz: float,
+        vbw_hz: float,
+        ref_level_dbm: float,
+    ) -> None:
+        # Single-sweep mode, so INIT:IMM really means "one sweep, then stop".
+        self._link.send("INIT:CONT OFF")
         self._link.send(f"SENS:FREQ:CENT {center_freq_hz:.1f}HZ")
         self._link.send(f"SENS:FREQ:SPAN {span_hz:.1f}HZ")
         self._link.send(f"SENS:BAND:RES {rbw_hz:.1f}HZ")
         self._link.send(f"SENS:BAND:VID {vbw_hz:.1f}HZ")
+        # Reference level above the expected peak, input attenuation coupled to it,
+        # so the analyser front end can't be overloaded.
+        self._link.send(f"DISP:WIND:TRAC:Y:RLEV {ref_level_dbm:.2f}DBM")
+        self._link.send("INP:ATT:AUTO ON")
         self.check_errors()
 
     def measure_peak_power_dbm(self) -> float:
@@ -128,9 +169,40 @@ class SpectrumAnalyser(ScpiInstrument):
         self._link.send("INIT:IMM")
         self._link.query("*OPC?")  # block until the sweep completes
         self._link.send("CALC:MARK1:MAX")
-        value = self._link.query("CALC:MARK1:Y?").strip()
+        raw = self._link.query("CALC:MARK1:Y?").strip()
         self.check_errors()
-        return float(value)
+        return _parse_power_reading(raw, self.name)
+
+
+def _parse_power_reading(raw: str, source: str) -> float:
+    """Turn the analyser's text reply into a number, or refuse it.
+
+    A reading that isn't a number, is the SCPI "not a number" value, or is
+    physically implausible is an instrument problem, not a measurement.
+    Reporting it as a PASS or FAIL would be misleading, so it raises instead.
+    """
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise MeasurementError(f"{source} returned a non-numeric reading: {raw!r}") from exc
+    if math.isnan(value) or math.isinf(value) or abs(value) >= SCPI_NAN:
+        raise MeasurementError(f"{source} returned no valid reading: {raw!r}")
+    if not (PLAUSIBLE_MIN_DBM <= value <= PLAUSIBLE_MAX_DBM):
+        raise MeasurementError(
+            f"{source} reading {value:.2f} dBm is outside the plausible range "
+            f"[{PLAUSIBLE_MIN_DBM:.0f}, {PLAUSIBLE_MAX_DBM:.0f}] dBm"
+        )
+    return value
+
+
+def _average_dbm(readings_dbm: list[float]) -> float:
+    """Average power readings in linear units (mW), then convert back to dBm.
+
+    Averaging dBm values directly is wrong: -10 dBm and -20 dBm do not
+    average to -15 dBm of power.
+    """
+    mean_mw = sum(10 ** (r / 10.0) for r in readings_dbm) / len(readings_dbm)
+    return 10.0 * math.log10(mean_mw)
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +220,7 @@ class TestConfig:
     generator_port: int
     analyser_ip: str
     analyser_port: int
-    test_frequency_hz: float
+    test_frequency_hz: float          # where the generator transmits (the carrier)
     test_power_dbm: float
     analyser_span_hz: float
     analyser_rbw_hz: float
@@ -156,27 +228,55 @@ class TestConfig:
     spec_limit_dbm: float
     limit_type: LimitType = LimitType.UPPER
     test_name: str = "RF Conformance Test"
+    # Where the analyser looks. None = on the carrier (e.g. an output power test).
+    # For a spurious emission test, set this away from the carrier, e.g. a harmonic.
+    measurement_freq_hz: Optional[float] = None
+    analyser_ref_level_dbm: float = 0.0
+    # Calibrated cable/attenuator loss between the DUT and the analyser, in dB.
+    # Added back to the reading so the result refers to the DUT's port.
+    path_loss_db: float = 0.0
+    settle_time_s: float = 0.2        # wait after RF on, before measuring
+    num_sweeps: int = 1               # readings averaged per result
+    # Expanded measurement uncertainty. A margin smaller than this is flagged
+    # as marginal: a pass or fail that the bench can't really tell apart.
+    measurement_uncertainty_db: float = 0.0
+
+    @property
+    def analyser_center_hz(self) -> float:
+        if self.measurement_freq_hz is None:
+            return self.test_frequency_hz
+        return self.measurement_freq_hz
 
 
 @dataclass(frozen=True)
 class TestResult:
     test_name: str
     timestamp_utc: str
+    carrier_freq_hz: float
+    measured_freq_hz: float
     measured_dbm: float
     limit_dbm: float
     limit_type: str
     margin_db: float
     passed: bool
+    marginal: bool
+    num_sweeps: int
+    path_loss_db: float
 
     def as_human_readable(self) -> str:
         verdict = "PASS" if self.passed else "FAIL"
+        if self.marginal:
+            verdict += " (marginal: within measurement uncertainty)"
         return (
             f"{self.test_name}\n"
-            f"  Timestamp      : {self.timestamp_utc}\n"
-            f"  Measured       : {self.measured_dbm:.2f} dBm\n"
-            f"  Limit ({self.limit_type:<5s}) : {self.limit_dbm:.2f} dBm\n"
-            f"  Margin         : {self.margin_db:+.2f} dB\n"
-            f"  Result         : {verdict}\n"
+            f"   Timestamp      : {self.timestamp_utc}\n"
+            f"   Carrier        : {self.carrier_freq_hz / 1e9:.4f} GHz\n"
+            f"   Measured at    : {self.measured_freq_hz / 1e9:.4f} GHz\n"
+            f"   Measured       : {self.measured_dbm:.2f} dBm "
+            f"({self.num_sweeps} sweep(s), path loss {self.path_loss_db:.2f} dB applied)\n"
+            f"   Limit ({self.limit_type:<5s}) : {self.limit_dbm:.2f} dBm\n"
+            f"   Margin         : {self.margin_db:+.2f} dB\n"
+            f"   Result         : {verdict}\n"
         )
 
     def as_machine_readable(self) -> dict:
@@ -239,32 +339,46 @@ def spectrum_analyser_session(ip: str, port: int) -> Iterator[SpectrumAnalyser]:
 # ---------------------------------------------------------------------------
 
 def run_conformance_test(config: TestConfig) -> TestResult:
+    if config.num_sweeps < 1:
+        raise ValueError("num_sweeps must be at least 1")
     logger.info("Starting %s", config.test_name)
 
-    with signal_generator_session(config.generator_ip, config.generator_port) as generator, \
-         spectrum_analyser_session(config.analyser_ip, config.analyser_port) as analyser:
+    # The analyser is opened first on purpose: `with` blocks exit in reverse
+    # order, so the generator's cleanup (RF off) is the first thing that runs.
+    with spectrum_analyser_session(config.analyser_ip, config.analyser_port) as analyser, \
+         signal_generator_session(config.generator_ip, config.generator_port) as generator:
 
         generator.configure(config.test_frequency_hz, config.test_power_dbm)
         analyser.configure(
-            center_freq_hz=config.test_frequency_hz,
+            center_freq_hz=config.analyser_center_hz,
             span_hz=config.analyser_span_hz,
             rbw_hz=config.analyser_rbw_hz,
             vbw_hz=config.analyser_vbw_hz,
+            ref_level_dbm=config.analyser_ref_level_dbm,
         )
 
         generator.output_on()
-        measured_dbm = analyser.measure_peak_power_dbm()
+        time.sleep(config.settle_time_s)  # let the source settle before trusting a reading
 
+        readings = [analyser.measure_peak_power_dbm() for _ in range(config.num_sweeps)]
+
+    measured_dbm = _average_dbm(readings) + config.path_loss_db
     margin_db, passed = _compute_margin(measured_dbm, config.spec_limit_dbm, config.limit_type)
+    marginal = abs(margin_db) < config.measurement_uncertainty_db
 
     return TestResult(
         test_name=config.test_name,
         timestamp_utc=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        carrier_freq_hz=config.test_frequency_hz,
+        measured_freq_hz=config.analyser_center_hz,
         measured_dbm=measured_dbm,
         limit_dbm=config.spec_limit_dbm,
         limit_type=config.limit_type.value,
         margin_db=margin_db,
         passed=passed,
+        marginal=marginal,
+        num_sweeps=config.num_sweeps,
+        path_loss_db=config.path_loss_db,
     )
 
 
@@ -286,19 +400,29 @@ def write_reports(result: TestResult, json_path: str = "rf_test_result.json") ->
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+    carrier_hz = 2_400_000_000.0
+
+    # Spurious emission check at the 2nd harmonic: the generator transmits at
+    # 2.4 GHz, and the analyser looks at 4.8 GHz, away from the carrier.
+    # Limit and loss values are illustrative.
     config = TestConfig(
         generator_ip="192.168.1.10",
         generator_port=5025,
         analyser_ip="192.168.1.11",
         analyser_port=5025,
-        test_frequency_hz=2_400_000_000.0,
+        test_frequency_hz=carrier_hz,
         test_power_dbm=-10.0,
+        measurement_freq_hz=2 * carrier_hz,
         analyser_span_hz=10_000_000.0,
         analyser_rbw_hz=100_000.0,
         analyser_vbw_hz=100_000.0,
-        spec_limit_dbm=-20.0,
+        analyser_ref_level_dbm=0.0,
+        spec_limit_dbm=-30.0,
         limit_type=LimitType.UPPER,
-        test_name="2.4 GHz Spurious Emission Conformance Test",
+        path_loss_db=1.5,
+        num_sweeps=5,
+        measurement_uncertainty_db=1.0,
+        test_name="2.4 GHz Spurious Emission Test (2nd harmonic, 4.8 GHz)",
     )
 
     try:
