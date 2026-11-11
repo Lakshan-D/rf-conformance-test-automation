@@ -274,7 +274,7 @@ class TestResult:
             f"   Measured at    : {self.measured_freq_hz / 1e9:.4f} GHz\n"
             f"   Measured       : {self.measured_dbm:.2f} dBm "
             f"({self.num_sweeps} sweep(s), path loss {self.path_loss_db:.2f} dB applied)\n"
-            f"   Limit ({self.limit_type:<5s}) : {self.limit_dbm:.2f} dBm\n"
+            f"   Limit ({self.limit_type:<5s})  : {self.limit_dbm:.2f} dBm\n"
             f"   Margin         : {self.margin_db:+.2f} dB\n"
             f"   Result         : {verdict}\n"
         )
