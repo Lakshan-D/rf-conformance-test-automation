@@ -1,5 +1,7 @@
 # RF Conformance Test Automation
 
+[![CI](https://github.com/Lakshan-D/rf-conformance-test-automation/actions/workflows/ci.yml/badge.svg)](https://github.com/Lakshan-D/rf-conformance-test-automation/actions/workflows/ci.yml)
+
 A small automated RF conformance test: a signal generator and a spectrum analyser are configured and driven remotely over SCPI/LAN, a measurement is taken, checked against a spec limit, and reported with a compliance margin in both human-readable and machine-readable form.
 
 Written for a technical challenge (AccelerComm, Graduate System Test Engineer). Brief: configure the instruments, run a measurement, compare it against a limit, calculate the margin, report PASS/FAIL in both forms, and handle errors and instrument cleanup properly.
@@ -69,7 +71,36 @@ python demo_simulated_bench.py            # all scenarios
 python demo_simulated_bench.py harmonic   # one scenario
 ```
 
-The simulated generator transmits a carrier plus a weaker 2nd harmonic, and the simulated analyser returns the power at whatever frequency it is tuned to, minus cable loss, plus a little noise. Scenarios: `harmonic` (spurious test, PASS), `v1_bug` (the v1.0 mistake, analyser on the carrier, FAIL), `output_power` (lower limit, marginal PASS), `marginal` (marginal FAIL), `bad_reading` (`9.91E37`, abort with RF off), `crash` (link drops mid-sweep, abort with RF off and both links closed).
+The simulated generator transmits a carrier plus a weaker 2nd harmonic, and the simulated analyser returns the power at whatever frequency it is tuned to, minus cable loss, plus a little noise. Example run (`harmonic` scenario, trimmed):
+
+```text
+  SCPI traffic (<- sent to instrument, -> reply):
+      generator <- SOUR:FREQ:FIXED 2400000000.0HZ
+      generator <- SOUR:POW -10.00DBM
+      analyser  <- SENS:FREQ:CENT 4800000000.0HZ
+      generator <- OUTP ON
+      analyser  <- INIT:IMM
+      analyser  -> *OPC?  =>  1
+      analyser  <- CALC:MARK1:MAX
+      analyser  -> CALC:MARK1:Y?  =>  -49.242
+      ... (3 sweeps averaged)
+      generator <- OUTP OFF
+      generator x  connection closed
+      analyser  x  connection closed
+
+  REPORT:
+  Spurious emission, 2nd harmonic
+     Carrier        : 2.4000 GHz
+     Measured at    : 4.8000 GHz
+     Measured       : -47.81 dBm (3 sweep(s), path loss 1.50 dB applied)
+     Limit (upper)  : -30.00 dBm
+     Margin         : +17.81 dB
+     Result         : PASS
+```
+
+Full output for every scenario: [docs/sample_demo_output.txt](docs/sample_demo_output.txt). The tests and the demo also run automatically on every push (see the CI badge above and the Actions tab).
+
+Scenarios: `harmonic` (spurious test, PASS), `v1_bug` (the v1.0 mistake, analyser on the carrier, FAIL), `output_power` (lower limit, marginal PASS), `marginal` (marginal FAIL), `bad_reading` (`9.91E37`, abort with RF off), `crash` (link drops mid-sweep, abort with RF off and both links closed).
 
 ## Running the tests
 

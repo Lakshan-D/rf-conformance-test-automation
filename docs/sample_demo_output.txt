@@ -1,0 +1,237 @@
+========================================================================
+SCENARIO: harmonic
+  Spurious emission at the 2nd harmonic (4.8 GHz), limit -30 dBm. Expect PASS.
+
+  SCPI traffic (<- sent to instrument, -> reply):
+      analyser  <- *RST
+      analyser  <- *CLS
+      generator <- *RST
+      generator <- *CLS
+      generator <- SOUR:FREQ:FIXED 2400000000.0HZ
+      generator <- SOUR:POW -10.00DBM
+      analyser  <- INIT:CONT OFF
+      analyser  <- SENS:FREQ:CENT 4800000000.0HZ
+      analyser  <- SENS:FREQ:SPAN 10000000.0HZ
+      analyser  <- SENS:BAND:RES 100000.0HZ
+      analyser  <- SENS:BAND:VID 100000.0HZ
+      analyser  <- DISP:WIND:TRAC:Y:RLEV 0.00DBM
+      analyser  <- INP:ATT:AUTO ON
+      generator <- OUTP ON
+      analyser  <- INIT:IMM
+      analyser  -> *OPC?  =>  1
+      analyser  <- CALC:MARK1:MAX
+      analyser  -> CALC:MARK1:Y?  =>  -49.242
+      analyser  <- INIT:IMM
+      analyser  -> *OPC?  =>  1
+      analyser  <- CALC:MARK1:MAX
+      analyser  -> CALC:MARK1:Y?  =>  -49.210
+      analyser  <- INIT:IMM
+      analyser  -> *OPC?  =>  1
+      analyser  <- CALC:MARK1:MAX
+      analyser  -> CALC:MARK1:Y?  =>  -49.487
+      generator <- OUTP OFF
+      generator x  connection closed
+      analyser  x  connection closed
+
+  REPORT:
+  Spurious emission, 2nd harmonic
+     Timestamp      : 2026-11-11T14:06:58+00:00
+     Carrier        : 2.4000 GHz
+     Measured at    : 4.8000 GHz
+     Measured       : -47.81 dBm (3 sweep(s), path loss 1.50 dB applied)
+     Limit (upper)  : -30.00 dBm
+     Margin         : +17.81 dB
+     Result         : PASS
+  
+========================================================================
+SCENARIO: v1_bug
+  The v1.0 mistake: spurious limit, but analyser tuned to the carrier. Expect FAIL.
+
+  SCPI traffic (<- sent to instrument, -> reply):
+      analyser  <- *RST
+      analyser  <- *CLS
+      generator <- *RST
+      generator <- *CLS
+      generator <- SOUR:FREQ:FIXED 2400000000.0HZ
+      generator <- SOUR:POW -10.00DBM
+      analyser  <- INIT:CONT OFF
+      analyser  <- SENS:FREQ:CENT 2400000000.0HZ
+      analyser  <- SENS:FREQ:SPAN 10000000.0HZ
+      analyser  <- SENS:BAND:RES 100000.0HZ
+      analyser  <- SENS:BAND:VID 100000.0HZ
+      analyser  <- DISP:WIND:TRAC:Y:RLEV 0.00DBM
+      analyser  <- INP:ATT:AUTO ON
+      generator <- OUTP ON
+      analyser  <- INIT:IMM
+      analyser  -> *OPC?  =>  1
+      analyser  <- CALC:MARK1:MAX
+      analyser  -> CALC:MARK1:Y?  =>  -11.653
+      analyser  <- INIT:IMM
+      analyser  -> *OPC?  =>  1
+      analyser  <- CALC:MARK1:MAX
+      analyser  -> CALC:MARK1:Y?  =>  -11.718
+      analyser  <- INIT:IMM
+      analyser  -> *OPC?  =>  1
+      analyser  <- CALC:MARK1:MAX
+      analyser  -> CALC:MARK1:Y?  =>  -11.494
+      generator <- OUTP OFF
+      generator x  connection closed
+      analyser  x  connection closed
+
+  REPORT:
+  Spurious emission (wrongly measured on carrier)
+     Timestamp      : 2026-11-11T14:06:58+00:00
+     Carrier        : 2.4000 GHz
+     Measured at    : 2.4000 GHz
+     Measured       : -10.12 dBm (3 sweep(s), path loss 1.50 dB applied)
+     Limit (upper)  : -20.00 dBm
+     Margin         : -9.88 dB
+     Result         : FAIL
+  
+========================================================================
+SCENARIO: output_power
+  Output power on the carrier, must be at least -11 dBm (LOWER limit). Expect PASS.
+
+  SCPI traffic (<- sent to instrument, -> reply):
+      analyser  <- *RST
+      analyser  <- *CLS
+      generator <- *RST
+      generator <- *CLS
+      generator <- SOUR:FREQ:FIXED 2400000000.0HZ
+      generator <- SOUR:POW -10.00DBM
+      analyser  <- INIT:CONT OFF
+      analyser  <- SENS:FREQ:CENT 2400000000.0HZ
+      analyser  <- SENS:FREQ:SPAN 10000000.0HZ
+      analyser  <- SENS:BAND:RES 100000.0HZ
+      analyser  <- SENS:BAND:VID 100000.0HZ
+      analyser  <- DISP:WIND:TRAC:Y:RLEV 0.00DBM
+      analyser  <- INP:ATT:AUTO ON
+      generator <- OUTP ON
+      analyser  <- INIT:IMM
+      analyser  -> *OPC?  =>  1
+      analyser  <- CALC:MARK1:MAX
+      analyser  -> CALC:MARK1:Y?  =>  -11.704
+      analyser  <- INIT:IMM
+      analyser  -> *OPC?  =>  1
+      analyser  <- CALC:MARK1:MAX
+      analyser  -> CALC:MARK1:Y?  =>  -11.787
+      analyser  <- INIT:IMM
+      analyser  -> *OPC?  =>  1
+      analyser  <- CALC:MARK1:MAX
+      analyser  -> CALC:MARK1:Y?  =>  -11.460
+      generator <- OUTP OFF
+      generator x  connection closed
+      analyser  x  connection closed
+
+  REPORT:
+  Output power
+     Timestamp      : 2026-11-11T14:06:58+00:00
+     Carrier        : 2.4000 GHz
+     Measured at    : 2.4000 GHz
+     Measured       : -10.15 dBm (3 sweep(s), path loss 1.50 dB applied)
+     Limit (lower)  : -11.00 dBm
+     Margin         : +0.85 dB
+     Result         : PASS (marginal: within measurement uncertainty)
+  
+========================================================================
+SCENARIO: marginal
+  Harmonic limit set to -48.5 dBm, right next to the real level. Expect marginal.
+
+  SCPI traffic (<- sent to instrument, -> reply):
+      analyser  <- *RST
+      analyser  <- *CLS
+      generator <- *RST
+      generator <- *CLS
+      generator <- SOUR:FREQ:FIXED 2400000000.0HZ
+      generator <- SOUR:POW -10.00DBM
+      analyser  <- INIT:CONT OFF
+      analyser  <- SENS:FREQ:CENT 4800000000.0HZ
+      analyser  <- SENS:FREQ:SPAN 10000000.0HZ
+      analyser  <- SENS:BAND:RES 100000.0HZ
+      analyser  <- SENS:BAND:VID 100000.0HZ
+      analyser  <- DISP:WIND:TRAC:Y:RLEV 0.00DBM
+      analyser  <- INP:ATT:AUTO ON
+      generator <- OUTP ON
+      analyser  <- INIT:IMM
+      analyser  -> *OPC?  =>  1
+      analyser  <- CALC:MARK1:MAX
+      analyser  -> CALC:MARK1:Y?  =>  -49.473
+      analyser  <- INIT:IMM
+      analyser  -> *OPC?  =>  1
+      analyser  <- CALC:MARK1:MAX
+      analyser  -> CALC:MARK1:Y?  =>  -49.391
+      analyser  <- INIT:IMM
+      analyser  -> *OPC?  =>  1
+      analyser  <- CALC:MARK1:MAX
+      analyser  -> CALC:MARK1:Y?  =>  -49.683
+      generator <- OUTP OFF
+      generator x  connection closed
+      analyser  x  connection closed
+
+  REPORT:
+  Spurious emission, tight limit
+     Timestamp      : 2026-11-11T14:06:58+00:00
+     Carrier        : 2.4000 GHz
+     Measured at    : 4.8000 GHz
+     Measured       : -48.01 dBm (3 sweep(s), path loss 1.50 dB applied)
+     Limit (upper)  : -48.50 dBm
+     Margin         : -0.49 dB
+     Result         : FAIL (marginal: within measurement uncertainty)
+  
+========================================================================
+SCENARIO: bad_reading
+  Analyser returns 9.91E37 (no valid data). Expect abort, RF still turned off.
+
+  SCPI traffic (<- sent to instrument, -> reply):
+      analyser  <- *RST
+      analyser  <- *CLS
+      generator <- *RST
+      generator <- *CLS
+      generator <- SOUR:FREQ:FIXED 2400000000.0HZ
+      generator <- SOUR:POW -10.00DBM
+      analyser  <- INIT:CONT OFF
+      analyser  <- SENS:FREQ:CENT 4800000000.0HZ
+      analyser  <- SENS:FREQ:SPAN 10000000.0HZ
+      analyser  <- SENS:BAND:RES 100000.0HZ
+      analyser  <- SENS:BAND:VID 100000.0HZ
+      analyser  <- DISP:WIND:TRAC:Y:RLEV 0.00DBM
+      analyser  <- INP:ATT:AUTO ON
+      generator <- OUTP ON
+      analyser  <- INIT:IMM
+      analyser  -> *OPC?  =>  1
+      analyser  <- CALC:MARK1:MAX
+      analyser  -> CALC:MARK1:Y?  =>  9.91E37
+      generator <- OUTP OFF
+      generator x  connection closed
+      analyser  x  connection closed
+
+  TEST ABORTED: MeasurementError: Spectrum Analyser returned no valid reading: '9.91E37'
+  RF left on after abort? False
+
+========================================================================
+SCENARIO: crash
+  LAN drops mid-sweep. Expect abort, RF still turned off, both links closed.
+
+  SCPI traffic (<- sent to instrument, -> reply):
+      analyser  <- *RST
+      analyser  <- *CLS
+      generator <- *RST
+      generator <- *CLS
+      generator <- SOUR:FREQ:FIXED 2400000000.0HZ
+      generator <- SOUR:POW -10.00DBM
+      analyser  <- INIT:CONT OFF
+      analyser  <- SENS:FREQ:CENT 4800000000.0HZ
+      analyser  <- SENS:FREQ:SPAN 10000000.0HZ
+      analyser  <- SENS:BAND:RES 100000.0HZ
+      analyser  <- SENS:BAND:VID 100000.0HZ
+      analyser  <- DISP:WIND:TRAC:Y:RLEV 0.00DBM
+      analyser  <- INP:ATT:AUTO ON
+      generator <- OUTP ON
+      analyser  <- INIT:IMM
+      generator <- OUTP OFF
+      generator x  connection closed
+      analyser  x  connection closed
+
+  TEST ABORTED: ConnectionError: LAN link to analyser dropped during INIT:IMM
+  RF left on after abort? False
+
