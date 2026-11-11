@@ -8,6 +8,7 @@ Written for a technical challenge (AccelerComm, Graduate System Test Engineer). 
 
 - `rf_conformance_test.py`: the solution.
 - `test_rf_conformance_test.py`: unit tests against a fake instrument link (no real hardware needed to run them).
+- `demo_simulated_bench.py`: runs the test against a simulated bench and prints every SCPI command and reply, so you can watch it work with no hardware.
 - `CHANGELOG.md`: what changed in v1.1 after a post-submission review, and why.
 
 ## v1.1: post-submission review
@@ -41,10 +42,38 @@ The brief states that instrument communication functions already exist and that 
 
 One sweep per run is the default (`num_sweeps=1`), since the brief didn't specify a repeat count; v1.1 can average several sweeps in linear power. The test is single-limit, single-frequency rather than a frequency sweep against a limit line. Extending to a sweep would mean looping the measure-compare step and collecting a list of `TestResult` objects rather than changing the core design.
 
+## Setup
+
+Everything runs inside a virtual environment. The module itself only uses the standard library; pytest is the only dependency.
+
+Windows (Command Prompt):
+
+```bat
+py -m venv .venv
+.venv\Scripts\activate
+python -m pip install -r requirements-dev.txt
+```
+
+macOS / Linux:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+```
+
+## Simulated bench demo
+
+```bash
+python demo_simulated_bench.py            # all scenarios
+python demo_simulated_bench.py harmonic   # one scenario
+```
+
+The simulated generator transmits a carrier plus a weaker 2nd harmonic, and the simulated analyser returns the power at whatever frequency it is tuned to, minus cable loss, plus a little noise. Scenarios: `harmonic` (spurious test, PASS), `v1_bug` (the v1.0 mistake, analyser on the carrier, FAIL), `output_power` (lower limit, marginal PASS), `marginal` (marginal FAIL), `bad_reading` (`9.91E37`, abort with RF off), `crash` (link drops mid-sweep, abort with RF off and both links closed).
+
 ## Running the tests
 
 ```bash
-pip install pytest
 python -m pytest -v
 ```
 
@@ -52,7 +81,7 @@ The tests exercise the module against a fake `InstrumentLink`: pass and fail cas
 
 ## AI-assisted development
 
-Claude helped scaffold the module structure and talk through a couple of edge cases while writing this, in particular the margin-sign logic for upper versus lower limits, and whether to use a context manager or a manual try/finally for cleanup. The design decisions and the final code are mine; I reviewed and adjusted what it suggested rather than taking it as given.
+This project was developed with AI assistance (Claude). After submitting, I reviewed the code line by line, found that the demo was measuring the carrier instead of a spurious emission, and fixed that along with several robustness issues in v1.1.
 
 ## Author
 
