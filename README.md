@@ -1,89 +1,162 @@
+<div align="center">
+
 # RF Conformance Test Automation
 
+**Python drives a signal generator and a spectrum analyser over SCPI, measures an RF emission, checks it against a spec limit and reports PASS / FAIL with a compliance margin.**
+
 [![CI](https://github.com/Lakshan-D/rf-conformance-test-automation/actions/workflows/ci.yml/badge.svg)](https://github.com/Lakshan-D/rf-conformance-test-automation/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.12%20%7C%203.14-blue)
+![Dependencies](https://img.shields.io/badge/runtime%20deps-standard%20library%20only-brightgreen)
+![Tests](https://img.shields.io/badge/tests-16%20passing-brightgreen)
+![Bench](https://img.shields.io/badge/bench-simulated-orange)
 
-A small automated RF conformance test: a signal generator and a spectrum analyser are configured and driven remotely over SCPI/LAN, a measurement is taken, checked against a spec limit, and reported with a compliance margin in both human-readable and machine-readable form.
+</div>
 
-Written for a technical challenge (AccelerComm, Graduate System Test Engineer). Brief: configure the instruments, run a measurement, compare it against a limit, calculate the margin, report PASS/FAIL in both forms, and handle errors and instrument cleanup properly.
+---
 
-## What's here
+## At a glance
 
-- `rf_conformance_test.py`: the solution.
-- `test_rf_conformance_test.py`: unit tests against a fake instrument link (no real hardware needed to run them).
-- `demo_simulated_bench.py`: runs the test against a simulated bench and prints every SCPI command and reply, so you can watch it work with no hardware.
-- `CHANGELOG.md`: what changed in v1.1 after a post-submission review, and why.
+| | |
+|---|---|
+| **What** | Automated RF conformance test: configure instruments, measure, compare to a limit, compute margin, report |
+| **Why** | Technical challenge for AccelerComm (Graduate System Test Engineer), then reviewed and improved as v1.1 |
+| **Instruments** | Signal generator + spectrum analyser over SCPI / LAN |
+| **Output** | Human-readable report **and** JSON, both from one `TestResult` dataclass |
+| **Safety** | RF is always switched off first, even if the test crashes mid-sweep |
+| **Verification** | 16 pytest cases against a fake instrument link, run in GitHub Actions on every push |
+| **Hardware** | None needed. A simulated bench prints every SCPI command and reply |
 
-## v1.1: post-submission review
+---
 
-After submitting, I went back through the code line by line and found a real mistake. The demo was labelled a spurious emission test, but the analyser was centred on the 2.4 GHz carrier itself, so it was really measuring output power against a spurious limit and failed by 10 dB every time.
+## The story: what I found and fixed (v1.0 to v1.1)
 
-v1.1 adds `measurement_freq_hz`, so the generator transmits on the carrier and the analyser can look somewhere else. Leave it as `None` for an output power test (measure on the carrier), or set it away from the carrier for a spurious test. The demo now checks the 2nd harmonic at 4.8 GHz.
+After submitting v1.0 I went back through the code line by line and found a real bug.
 
-| Test | `measurement_freq_hz` | Limit type |
+> **The demo was labelled a spurious emission test, but the analyser was centred on the 2.4 GHz carrier.**
+> So it measured the carrier itself (about -10 dBm) against a -20 dBm spurious limit and failed by about 10 dB **every single run**.
+> The hardware was fine. The test was measuring the wrong thing.
+
+```mermaid
+flowchart LR
+    G["Signal generator<br/>2.4 GHz carrier, -10 dBm"] --> D["DUT output<br/>carrier + 2nd harmonic"]
+    D --> C["Cable<br/>1.5 dB loss"]
+    C --> A["Spectrum analyser"]
+    A -. "v1.0: centred on 2.4 GHz, measured the carrier" .-> X1(["FAIL by ~10 dB, every run"])
+    A -- "v1.1: centred on 4.8 GHz, measures the harmonic" --> X2(["PASS, +17.81 dB margin"])
+```
+
+**The fix:** a new `measurement_freq_hz` setting separates *where the generator transmits* from *where the analyser looks*.
+
+| Test type | `measurement_freq_hz` | Limit type |
 |---|---|---|
 | Output power | `None` (measure on the carrier) | usually `LOWER` |
-| Spurious emission | away from the carrier, e.g. 2nd harmonic | `UPPER` |
+| Spurious emission | away from the carrier, e.g. 4.8 GHz 2nd harmonic | `UPPER` |
 
-The same review also added a plausibility check on readings (so `9.91E37` aborts instead of producing a verdict), a full error-queue drain, `*RST` before `*CLS`, single-sweep mode, a settle time after RF on, path loss correction, averaging in linear power, and a marginal flag for results inside the measurement uncertainty. Details are in [CHANGELOG.md](CHANGELOG.md). The original submission is the first commit.
+### Everything else the same review changed
 
-## Approach
+| Area | v1.0 | v1.1 | Why it matters |
+|---|---|---|---|
+| Measurement frequency | Analyser always on the carrier | `measurement_freq_hz` | Spurious tests now measure the spur |
+| Bad readings | `9.91E37` became a number and got a verdict | Rejects `9.91E37`, NaN, text, anything outside -200 to +40 dBm | No fake PASS from "no valid value" |
+| Error queue | First `SYST:ERR?` only | Drained until 0, max 20 reads | Every instrument error is reported |
+| Reset order | Wrong way round | `*RST` then `*CLS` | Errors queued by the reset get cleared too |
+| Sweep mode | Free-running | `INIT:CONT OFF` + `INIT:IMM` + `*OPC?` | Every reading is one complete sweep |
+| Settling | None | `settle_time_s` (0.2 s) after RF on | Source settles before the first reading |
+| Path loss | Ignored | `path_loss_db` added back | Result refers to the DUT port, not the analyser input |
+| Averaging | Single reading | `num_sweeps`, averaged in **mW**, not dB | Averaging dB values reads low |
+| Uncertainty | None | `measurement_uncertainty_db` flags results as **marginal** | +0.3 dB on a 1 dB bench is not a confident pass |
+| Cleanup order | Generator session opened first | Analyser session opened first | `with` exits in reverse, so **RF off is the first cleanup step** |
 
-Three layers: a thin SCPI wrapper shared by both instruments (reset, identify, read the error queue), instrument-specific classes for the generator and the analyser, and a top-level test function that only deals with conformance-test logic (configure, measure, compare, report). Keeping those separate means the SCPI command set can change without touching the pass/fail logic, and the test logic can be unit tested against a fake instrument instead of real hardware.
-
-Instrument lifecycle uses Python context managers for both the generator and the analyser rather than manual try/finally blocks scattered through the test function. A `with` statement already guarantees its exit code runs on any exception, so if configuration or the measurement fails partway through, the generator output still gets turned off and both connections still close, without tracking that manually at every call site. The generator's cleanup explicitly turns the output off before closing, since leaving an RF source live after a failed test causes real problems on a shared bench. The analyser session is opened first, so (because `with` blocks exit in reverse order) turning RF off is the very first cleanup step.
-
-The compliance margin is calculated as limit minus measured for an upper limit, and measured minus limit for a lower limit, so a positive margin always means pass with that much headroom, and a negative margin always means fail by that amount, regardless of which direction the spec runs.
-
-Errors are checked two ways: after every SCPI configuration call, the instrument's own error queue (`SYST:ERR?`) is queried, since an instrument can silently ignore a malformed command rather than raising anything on the comms layer; and any Python-level exception (a timeout, a dropped connection, a bad value) propagates up through the context managers, so cleanup still runs before the exception reaches the caller. Retries were left out deliberately: a failed measurement should fail loudly and visibly rather than quietly retrying and masking an intermittent fault.
-
-Reporting is split into a human-readable block (printed for whoever is watching the test run) and a machine-readable JSON file (for a CI pipeline or a results database), both built from the same `TestResult` dataclass so the two views can't drift out of sync.
-
-## Assumptions
-
-The brief states that instrument communication functions already exist and that the measured value is available from the analyser API, so `connect_instrument()` is treated as the existing low-level comms layer, and `measure_peak_power_dbm()` is written as a thin wrapper over a realistic single-sweep-plus-marker-peak SCPI sequence (`INIT:IMM`, `*OPC?`, `CALC:MARK1:MAX`, `CALC:MARK1:Y?`). If the real analyser API already returns the measured value directly, that one method is the only thing that would need to change; everything downstream of it stays the same.
-
-One sweep per run is the default (`num_sweeps=1`), since the brief didn't specify a repeat count; v1.1 can average several sweeps in linear power. The test is single-limit, single-frequency rather than a frequency sweep against a limit line. Extending to a sweep would mean looping the measure-compare step and collecting a list of `TestResult` objects rather than changing the core design.
-
-## Setup
-
-Everything runs inside a virtual environment. The module itself only uses the standard library; pytest is the only dependency.
-
-Windows (Command Prompt):
-
-```bat
-py -m venv .venv
-.venv\Scripts\activate
-python -m pip install -r requirements-dev.txt
-```
-
-macOS / Linux:
+Full details: [CHANGELOG.md](CHANGELOG.md). The original submission is commit `f4b1e78`, the review is `53f21f9`:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements-dev.txt
+git diff f4b1e78 53f21f9 -- rf_conformance_test.py
 ```
 
-## Simulated bench demo
+---
+
+## How it is built
+
+```mermaid
+flowchart TB
+    T["run_conformance_test(config)<br/>test logic only: configure, measure, compare, report"]
+    I["SignalGenerator  |  SpectrumAnalyser<br/>one class per instrument"]
+    S["ScpiInstrument<br/>*RST, *CLS, *IDN?, SYST:ERR?, close"]
+    L["InstrumentLink: send, query, close<br/>real comms layer, or a fake in tests and demo"]
+    T --> I --> S --> L
+```
+
+**Three layers.** The SCPI command set can change without touching the pass/fail logic, and the test logic can be tested against a fake instrument instead of real hardware.
+
+<details>
+<summary><b>Design decisions, explained</b></summary>
+
+- **Context managers, not scattered try/finally.** `signal_generator_session()` and `spectrum_analyser_session()` own their cleanup. If anything fails, RF is turned off and both links close. Each cleanup step has its own `try`, so one failing step can't skip the next, and cleanup errors are logged rather than hiding the original exception.
+- **Margin sign convention.** Upper limit: `limit - measured`. Lower limit: `measured - limit`. Positive always means pass with that much headroom, whatever direction the spec runs.
+- **Errors checked two ways.** The instrument's own queue (`SYST:ERR?`) after every configuration call, because instruments often silently ignore a bad command. Python exceptions (timeouts, dropped links) propagate through the context managers, so cleanup still runs.
+- **No retries, on purpose.** An intermittent fault should fail loudly so an engineer investigates, not be quietly retried into a pass.
+- **One source of truth for reports.** The text report and the JSON (`asdict()`) both come from the same frozen `TestResult`, so they can never disagree. JSON keeps full precision; rounding is for display only.
+- **Frozen dataclasses.** `TestConfig` and `TestResult` can't be changed mid-test.
+
+</details>
+
+<details>
+<summary><b>Measurement SCPI sequence</b></summary>
+
+| Command | Purpose |
+|---|---|
+| `*RST` then `*CLS` | Known state, empty error queue |
+| `INIT:CONT OFF` | Stop free-running sweeps |
+| `SENS:FREQ:CENT` | Centre on `measurement_freq_hz` (the v1.1 fix) |
+| `OUTP ON` | RF on, then wait `settle_time_s` |
+| `INIT:IMM` + `*OPC?` | One sweep, block until complete |
+| `CALC:MARK1:MAX` + `CALC:MARK1:Y?` | Peak marker, read the level |
+| `OUTP OFF` | First thing in cleanup, always |
+
+</details>
+
+<details>
+<summary><b>Assumptions</b></summary>
+
+The brief stated the instrument communication layer already exists, so `connect_instrument()` is a placeholder for it (it raises `NotImplementedError`; the tests and demo inject a fake link). `measure_peak_power_dbm()` wraps a realistic single-sweep + peak-marker SCPI sequence. If the real analyser API returns the value directly, that one method is the only thing that changes. The test is single-frequency, single-limit; a sweep against a limit line is listed under next steps.
+
+</details>
+
+---
+
+## Proof it works
+
+### 1. Simulated bench demo
 
 ```bash
 python demo_simulated_bench.py            # all scenarios
 python demo_simulated_bench.py harmonic   # one scenario
 ```
 
-The simulated generator transmits a carrier plus a weaker 2nd harmonic, and the simulated analyser returns the power at whatever frequency it is tuned to, minus cable loss, plus a little noise. Example run (`harmonic` scenario, trimmed):
+| Scenario | What it shows | Result |
+|---|---|---|
+| `harmonic` | 2nd harmonic at 4.8 GHz, -30 dBm upper limit | **PASS**, margin +17.81 dB |
+| `v1_bug` | The v1.0 mistake, analyser on the carrier | **FAIL**, margin -9.88 dB |
+| `output_power` | Carrier power, -11 dBm lower limit | **PASS (marginal)**, +0.85 dB |
+| `marginal` | Limit right next to the real level | **FAIL (marginal)**, -0.49 dB |
+| `bad_reading` | Analyser returns `9.91E37` | **ABORT**, RF still turned off |
+| `crash` | LAN link drops mid-sweep | **ABORT**, RF off, both links closed |
+
+<details>
+<summary><b>Example output: <code>harmonic</code> scenario</b></summary>
 
 ```text
   SCPI traffic (<- sent to instrument, -> reply):
       generator <- SOUR:FREQ:FIXED 2400000000.0HZ
       generator <- SOUR:POW -10.00DBM
+      analyser  <- INIT:CONT OFF
       analyser  <- SENS:FREQ:CENT 4800000000.0HZ
       generator <- OUTP ON
       analyser  <- INIT:IMM
       analyser  -> *OPC?  =>  1
       analyser  <- CALC:MARK1:MAX
       analyser  -> CALC:MARK1:Y?  =>  -49.242
-      ... (3 sweeps averaged)
+      ... (3 sweeps averaged in mW)
       generator <- OUTP OFF
       generator x  connection closed
       analyser  x  connection closed
@@ -98,22 +171,82 @@ The simulated generator transmits a carrier plus a weaker 2nd harmonic, and the 
      Result         : PASS
 ```
 
-Full output for every scenario: [docs/sample_demo_output.txt](docs/sample_demo_output.txt). The tests and the demo also run automatically on every push (see the CI badge above and the Actions tab).
+Full output for every scenario: [docs/sample_demo_output.txt](docs/sample_demo_output.txt)
 
-Scenarios: `harmonic` (spurious test, PASS), `v1_bug` (the v1.0 mistake, analyser on the carrier, FAIL), `output_power` (lower limit, marginal PASS), `marginal` (marginal FAIL), `bad_reading` (`9.91E37`, abort with RF off), `crash` (link drops mid-sweep, abort with RF off and both links closed).
+</details>
 
-## Running the tests
+### 2. Unit tests: 16 cases, no hardware
 
 ```bash
 python -m pytest -v
 ```
 
-The tests exercise the module against a fake `InstrumentLink`: pass and fail cases, upper and lower limits, path loss, averaging, the marginal flag, the analyser being centred on the measurement frequency rather than the carrier, bad readings (`9.91E37`, NaN, text, out of range) aborting the test, multiple queued SCPI errors all being reported, RF being turned off before either connection closes, and a crash mid-sweep still leaving RF off and both instruments closed.
+16 test cases from 13 test functions (one is parametrised over four bad readings). Each test swaps in a fake `InstrumentLink` that records every command and returns scripted replies.
+
+| Group | What is checked |
+|---|---|
+| **Maths** | Pass with margin, fail with negative margin, lower limit, path loss added back, marginal flag, averaging in linear power |
+| **The v1.1 fix** | Analyser centred on the measurement frequency, not the carrier |
+| **Bad readings** | `9.91E37`, `nan`, `garbage`, `120.0` all abort the test |
+| **Errors** | Every queued SCPI error is reported |
+| **Safety** | RF off before anything closes; a crash mid-test still turns RF off and closes both links |
+| **Setup + output** | `*RST` before `*CLS`; text and JSON reports correct |
+
+**Test quality check (mutation test):** swapping the sign in the upper-limit margin calculation makes 5 tests fail immediately, so the margin maths is genuinely covered, not just executed.
+
+### 3. Continuous integration
+
+GitHub Actions runs the tests and the demo on every push (Python 3.12). Also run locally on Python 3.14.
+
+---
+
+## Quick start
+
+```bash
+git clone https://github.com/Lakshan-D/rf-conformance-test-automation.git
+cd rf-conformance-test-automation
+python -m venv .venv
+```
+
+| Windows (PowerShell) | macOS / Linux |
+|---|---|
+| `.venv\Scripts\Activate.ps1` | `source .venv/bin/activate` |
+
+```bash
+python -m pip install -r requirements-dev.txt   # pytest only
+python -m pytest -v
+python demo_simulated_bench.py
+```
+
+## Repository layout
+
+```
+rf_conformance_test.py        the solution (standard library only)
+test_rf_conformance_test.py   16 pytest cases against a fake instrument link
+demo_simulated_bench.py       simulated bench, prints every SCPI command and reply
+CHANGELOG.md                  what v1.1 changed and why
+docs/sample_demo_output.txt   full demo output, all scenarios
+.github/workflows/ci.yml      runs tests + demo on every push
+```
+
+---
+
+## Limitations and next steps
+
+| Now | Next |
+|---|---|
+| Simulated bench only | Real comms layer with PyVISA, then validate on a real generator + analyser |
+| Exit code 1 for both FAIL and ABORT | Separate codes (0 pass, 1 fail, 2 abort), so "bad DUT" and "broken bench" are distinguishable |
+| Single frequency, single limit | Read the full trace (`TRAC:DATA?`), check it against a frequency-dependent limit mask, report the worst point |
+| Config hard-coded in `main()` | Test configs loaded from YAML / JSON files |
+| Results printed and saved locally | Push JSON to a results database and trend margin per unit over time |
+
+---
 
 ## AI-assisted development
 
-This project was developed with AI assistance (Claude). After submitting, I reviewed the code line by line, found that the demo was measuring the carrier instead of a spurious emission, and fixed that along with several robustness issues in v1.1.
+Built with AI assistance (Claude). After submitting, I reviewed the code line by line, found that the demo was measuring the carrier instead of the spurious emission, and fixed that together with the robustness issues listed above in v1.1. I have run, modified and mutation-tested the code myself.
 
 ## Author
 
-Lakshan Divakar, [linkedin.com/in/lakshan-d](https://linkedin.com/in/lakshan-d)
+**Lakshan Divakar** · [linkedin.com/in/lakshan-d](https://linkedin.com/in/lakshan-d)
